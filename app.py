@@ -4,9 +4,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import google.generativeai as genai
 import os
+import re
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="V10.0 Gemini 3.1 旗艦分析師", layout="wide")
+st.set_page_config(page_title="V12.0 AI 精準定價系統", layout="wide")
 
 # --- 1. 股票代碼資料庫 ---
 STOCK_DB = {
@@ -19,9 +20,11 @@ STOCK_DB = {
     "MSTR": "MSTR", "COIN": "COIN", "SMCI": "SMCI", "GOOG": "GOOG"
 }
 
-def smart_get_data(user_input, period="6mo"):
+# --- 2. 智能數據獲取 ---
+def smart_get_data(user_input, time_frame):
     user_input = user_input.strip().upper()
     target_ticker = user_input
+    
     for key, val in STOCK_DB.items():
         if key in user_input:
             target_ticker = val
@@ -29,9 +32,26 @@ def smart_get_data(user_input, period="6mo"):
     if user_input.isdigit():
         target_ticker = f"{str(int(user_input)).zfill(4)}.HK"
 
+    # 時間週期設定
+    period = "6mo"
+    interval = "1d"
+    
+    if time_frame == "1 Day (即時)":
+        period = "1d"; interval = "5m"
+    elif time_frame == "5 Days":
+        period = "5d"; interval = "15m"
+    elif time_frame == "1 Month":
+        period = "1mo"; interval = "1d"
+    elif time_frame == "3 Months":
+        period = "3mo"; interval = "1d"
+    elif time_frame == "6 Months":
+        period = "6mo"; interval = "1d"
+    elif time_frame == "1 Year":
+        period = "1y"; interval = "1d"
+
     try:
         stock = yf.Ticker(target_ticker)
-        df = stock.history(period=period)
+        df = stock.history(period=period, interval=interval)
         if df.empty: return None, None, target_ticker
         try: info = stock.info
         except: info = {}
@@ -39,10 +59,11 @@ def smart_get_data(user_input, period="6mo"):
     except:
         return None, None, target_ticker
 
-# --- 2. 技術指標運算 ---
+# --- 3. 技術指標運算 ---
 def calculate_indicators(df):
+    if len(df) < 20: return df # 數據不足不運算
+    
     df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA60'] = df['Close'].rolling(window=60).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['Upper'] = df['MA20'] + (2 * df['STD20'])
     df['Lower'] = df['MA20'] - (2 * df['STD20'])
@@ -57,121 +78,116 @@ def calculate_indicators(df):
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
     return df
 
-# --- 3. AI 核心 (自動偵測最新模型) ---
-def get_available_models(api_key):
-    """查詢 Google 帳號目前能用的最新模型列表"""
+# --- 4. AI 核心：精準定價運算 ---
+def ask_gemini_pricing(api_key, ticker, df, time_frame):
+    """
+    請求 AI 給出精確的數值，並解析結果
+    """
     genai.configure(api_key=api_key)
-    available = []
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available.append(m.name)
-    except:
-        pass
-    return available
-
-def ask_gemini(api_key, ticker, df):
-    genai.configure(api_key=api_key)
-    recent_data = df.tail(5).to_string()
+    recent_data = df.tail(10).to_string()
     last = df.iloc[-1]
     
+    # 這是給 AI 的嚴格指令，要求它做數學運算
     prompt = f"""
-    角色：你是一位華爾街頂級分析師，精通技術分析與宏觀經濟。
-    標的：{ticker}
+    角色：你是一位華爾街頂級量化交易員。
+    任務：分析以下股票數據，計算出【最精準】的買入價與賣出價。
     
-    【關鍵數據】
+    標的：{ticker} (週期: {time_frame})
+    
+    【最新技術指標】
     - 現價：{last['Close']:.2f}
     - RSI(14)：{last['RSI']:.2f}
-    - MACD：{last['MACD']:.3f} (Signal: {last['Signal']:.3f})
-    - 布林通道：上 {last['Upper']:.2f} / 下 {last['Lower']:.2f}
-    - 均線：月線 {last['MA20']:.2f} / 季線 {last['MA60']:.2f}
+    - MACD：{last['MACD']:.3f}
+    - 布林上軌：{last['Upper']:.2f}
+    - 布林下軌：{last['Lower']:.2f}
+    - 20日均線：{last['MA20']:.2f}
     
-    【近5日數據】
+    【近10筆詳細數據】
     {recent_data}
     
-    請用【繁體中文】與【專業條列式】回答：
-    1. **趨勢診斷**：目前多空結構判斷。
-    2. **買賣訊號**：RSI 與通道的具體操作建議。
-    3. **策略規劃**：進場點、止損點、獲利點建議。
+    請用繁體中文回答，必須包含以下三個部分：
+    1. **【AI 精算價格】**：
+       - 請直接給出一個具體的「最佳買入價格」數字。
+       - 請直接給出一個具體的「最佳賣出/止盈價格」數字。
+       (不要給範圍，請根據支撐壓力算出一個最可能的精確值)
+       
+    2. **【精簡分析】**：一句話解釋為什麼選這兩個價格。
+    
+    3. **【詳細邏輯】**：詳細解釋你的運算邏輯（為什麼這個價格是強力支撐或壓力）。
     """
     
-# --- 優先順序清單 (修正版：加入更多穩定模型) ---
-    priority_models = [
-        'gemini-2.0-flash-exp', # 嘗試最新的
-        'gemini-1.5-pro',       # 最強穩定版
-        'gemini-1.5-flash',     # 速度最快版 (保底)
-        'gemini-pro'            # 舊版 (最後手段)
-    ]
+    models = ['gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro']
     
-    used_model = "Unknown"
-    response_text = ""
-    
-    # 嘗試連線
-    for model_name in priority_models:
+    for m in models:
         try:
-            model = genai.GenerativeModel(model_name)
+            model = genai.GenerativeModel(m)
             response = model.generate_content(prompt)
-            response_text = response.text
-            used_model = model_name
-            break # 成功了就跳出迴圈
-        except:
-            continue # 失敗就試下一個
-
-    if response_text == "":
-        return "❌ 無法連接任何 AI 模型，請檢查 API Key 或額度。", "None"
-        
-    return response_text, used_model
+            return response.text
+        except: continue
+    return "❌ AI 連線失敗"
 
 # --- 主畫面 ---
-st.title("🤖 V10.0 Gemini 3.1 旗艦分析師")
+st.title("⚡ V12.0 AI 精準定價系統")
 
-# --- 自動環境變數偵測 ---
-env_key = os.environ.get("GOOGLE_API_KEY")
+# 環境變數 Key
+api_key = os.environ.get("GOOGLE_API_KEY")
+if not api_key:
+    # 嘗試從 Streamlit Secrets 讀取 (進階用法)
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+    else:
+        api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password")
 
-if env_key:
-    api_key = env_key
-    st.sidebar.success("🔒 安全連線：已使用系統加密 Key")
-else:
-    st.sidebar.warning("⚠️ 未偵測到環境變數")
-    api_key = st.sidebar.text_input("請輸入 Gemini API Key", type="password")
-
-st.sidebar.header("🔍 股票搜尋")
+st.sidebar.header("🔍 操盤設定")
 stock_input = st.sidebar.text_input("輸入代號", value="NVDA")
+time_options = ["1 Day (即時)", "5 Days", "1 Month", "3 Months", "6 Months", "1 Year"]
+selected_time = st.sidebar.selectbox("⏱️ 選擇時間週期", time_options, index=0) # 預設改為即時
 
-if st.sidebar.button("🚀 啟動 AI 分析"):
+if st.sidebar.button("🚀 AI 智能運算 (獲取精準價格)"):
     if not api_key:
         st.error("❌ 請輸入 API Key！")
     else:
-        with st.spinner('AI 正在切換至最強模型進行分析...'):
-            df, info, ticker = smart_get_data(stock_input)
+        with st.spinner('AI 正在進行大數據運算，尋找最佳買賣點...'):
+            df, info, ticker = smart_get_data(stock_input, selected_time)
             
             if df is not None:
                 df = calculate_indicators(df)
                 last = df.iloc[-1]
+                prev = df.iloc[-2] if len(df) > 1 else last
                 
-                st.subheader(f"📊 {ticker} 深度報告")
+                # 1. 顯示即時報價
+                st.subheader(f"🏷️ {ticker} 即時看板")
                 c1, c2, c3 = st.columns(3)
-                c1.metric("最新價", f"{last['Close']:.2f}")
-                c2.metric("RSI", f"{last['RSI']:.2f}")
+                c1.metric("💰 最新成交價", f"{last['Close']:.2f}", f"{(last['Close'] - prev['Close']):.2f}")
+                c2.metric("📊 RSI 動能", f"{last['RSI']:.2f}")
                 
-                ai_reply, used_model = ask_gemini(api_key, ticker, df)
+                # 2. 呼叫 AI 進行精算
+                ai_result = ask_gemini_pricing(api_key, ticker, df, selected_time)
                 
-                # 顯示使用的模型版本 (讓你知道是不是用到 3.1)
-                st.markdown("---")
-                st.caption(f"🧠 AI 核心版本：`{used_model}`")
-                st.info(ai_reply)
-                
-                # 畫圖
-                st.markdown("---")
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='月線'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='red', width=1, dash='dot'), name='壓力'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='green', width=1, dash='dot'), name='支撐'))
-                fig.update_layout(height=500, xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
+                if "AI 連線失敗" in ai_result:
+                    st.error("AI 連線失敗，請檢查 Key。")
+                else:
+                    # 3. 顯示 AI 算出來的結果
+                    st.markdown("---")
+                    st.markdown("### 🤖 AI 精算結果 (Gemini Computed)")
+                    
+                    # 使用 Info 框顯示 AI 的完整回答
+                    st.info(ai_result)
+                    
+                    # 4. 顯示圖表
+                    st.markdown("---")
+                    fig = go.Figure()
+                    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
+                    
+                    if len(df) > 20:
+                        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='均線'))
+                        fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='red', width=1, dash='dot'), name='壓力'))
+                        fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='green', width=1, dash='dot'), name='支撐'))
+                    
+                    fig.update_layout(title=f"{ticker} - {selected_time} 走勢圖", height=500, xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig, use_container_width=True)
             else:
                 st.error(f"找不到代號：{stock_input}")
-
