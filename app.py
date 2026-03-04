@@ -97,16 +97,12 @@ def ask_gemini(api_key, ticker, df):
     3. **策略規劃**：進場點、止損點、獲利點建議。
     """
     
-    # --- 優先順序清單 (將 3.1 Pro 放在最前面) ---
-    # 這裡列出可能的模型名稱，程式會依序嘗試
+# --- 優先順序清單 (修正版：加入更多穩定模型) ---
     priority_models = [
-        'gemini-3.1-pro', 
-        'gemini-3.1-pro-preview',
-        'gemini-3.0-pro',
-        'gemini-1.5-pro',
-        'gemini-1.5-pro-latest',
-        'gemini-1.5-flash',
-        'gemini-pro'
+        'gemini-2.0-flash-exp', # 嘗試最新的
+        'gemini-1.5-pro',       # 最強穩定版
+        'gemini-1.5-flash',     # 速度最快版 (保底)
+        'gemini-pro'            # 舊版 (最後手段)
     ]
     
     used_model = "Unknown"
@@ -178,3 +174,4 @@ if st.sidebar.button("🚀 啟動 AI 分析"):
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.error(f"找不到代號：{stock_input}")
+
