@@ -5,46 +5,48 @@ import plotly.graph_objects as go
 import requests
 import os
 import numpy as np
+import time
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="Felix AI 股票分析員", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
     <style>
-    .stApp { background-color: #000000; color: #c9d1d9; }
+    .stApp { background-color: #0d1117; color: #c9d1d9; }
     h1 { 
-        background: linear-gradient(to right, #00f260, #0575e6);
+        background: linear-gradient(to right, #58a6ff, #00d2ff);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 900;
+        font-family: 'Helvetica Neue', sans-serif;
     }
     .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 8px; }
     .stMetric label { color: #8b949e; }
     .stMetric div[data-testid="stMetricValue"] { color: #fff; font-size: 26px; font-weight: bold; }
     
-    /* 主按鈕：狼性綠 */
     .stButton>button { 
-        width: 100%; background: linear-gradient(90deg, #11998e, #38ef7d); 
-        color: black; font-weight: bold; border: none; height: 55px; font-size: 18px; border-radius: 8px;
+        width: 100%; background: linear-gradient(90deg, #1f6feb, #11998e); 
+        color: white; font-weight: bold; border: none; height: 55px; font-size: 18px; border-radius: 8px;
     }
-    .stButton>button:hover { transform: scale(1.02); box-shadow: 0 0 15px #38ef7d; }
+    .stButton>button:hover { transform: scale(1.01); box-shadow: 0 0 15px rgba(31, 111, 235, 0.5); }
     
-    /* 提問按鈕：科技藍 */
     div[data-testid="stSidebar"] .stButton:nth-of-type(2) button {
-        background: linear-gradient(90deg, #2193b0, #6dd5ed); color: black;
+        background: linear-gradient(90deg, #8957e5, #b392f0); color: white;
     }
     
     .stTextArea textarea { background-color: #0d1117; color: #fff; border: 1px solid #30363d; }
-    .stRadio div { color: #fff; }
+    .stSuccess { background-color: #064e3b; border-left: 5px solid #34d399; }
+    .stError { background-color: #450a0a; border-left: 5px solid #f85149; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 超級代碼翻譯機 (解決找不到 GOOGLE 的問題) ---
+# --- 2. 模擬富途搜尋 (Smart Ticker Resolver v2) ---
 def resolve_ticker(user_input):
     clean = user_input.strip().upper()
     
-    # 常見名稱對照表 (User 輸入名稱 -> 轉換為正確代碼)
+    # 擴充字典：模擬富途牛牛的關聯詞搜尋
     MAPPING = {
+        # 美股巨頭
         "GOOGLE": "GOOG", "GOOGL": "GOOG", "ALPHABET": "GOOG",
         "TESLA": "TSLA", "TSLA": "TSLA",
         "APPLE": "AAPL", "AAPL": "AAPL",
@@ -54,177 +56,195 @@ def resolve_ticker(user_input):
         "META": "META", "FACEBOOK": "META",
         "NETFLIX": "NFLX",
         "AMD": "AMD", "INTEL": "INTC", "TSM": "TSM", "TSMC": "TSM",
-        "COINBASE": "COIN", "MSTR": "MSTR",
+        "COIN": "COIN", "COINBASE": "COIN",
+        "MSTR": "MSTR", "MICROSTRATEGY": "MSTR",
+        "SMCI": "SMCI", "SUPERMICRO": "SMCI",
+        "PLTR": "PLTR", "PALANTIR": "PLTR",
+        
+        # 港股熱門
         "TENCENT": "0700.HK", "騰訊": "0700.HK", "700": "0700.HK",
         "ALIBABA": "9988.HK", "BABA": "9988.HK", "阿里": "9988.HK", "9988": "9988.HK",
         "MEITUAN": "3690.HK", "美團": "3690.HK", "3690": "3690.HK",
         "XIAOMI": "1810.HK", "小米": "1810.HK", "1810": "1810.HK",
         "BYD": "1211.HK", "比亞迪": "1211.HK", "1211": "1211.HK",
-        "HSBC": "0005.HK", "匯豐": "0005.HK", "5": "0005.HK",
+        "HSBC": "0005.HK", "匯豐": "0005.HK", "5": "0005.HK", "0005": "0005.HK",
         "HKEX": "0388.HK", "港交所": "0388.HK", "388": "0388.HK",
-        "SHOUCHENG": "0697.HK", "首程": "0697.HK", "0697": "0697.HK",
-        "SMCI": "SMCI", "PLTR": "PLTR"
+        "SHOUCHENG": "0697.HK", "首程": "0697.HK", "首程控股": "0697.HK", "0697": "0697.HK",
+        "TRAVELSKY": "0696.HK", "中航信": "0696.HK",
+        "AIRPORT": "0694.HK", "北京機場": "0694.HK"
     }
     
     if clean in MAPPING:
         return MAPPING[clean]
     
-    # 港股邏輯
+    # 智能判斷：純數字預設為港股
     if clean.isdigit(): 
         return f"{int(clean):04d}.HK"
     
-    # 預設直接回傳
+    # 智能判斷：純字母預設為美股
+    if clean.isalpha() and len(clean) <= 5:
+        return clean
+        
     return clean
 
-# --- 3. 數據抓取 ---
-def get_data_v33(ticker):
+# --- 3. 數據抓取 (加強容錯) ---
+def get_data_v34(ticker):
     try:
         stock = yf.Ticker(ticker)
-        # 抓取 3 年數據，足夠計算長期均線，也不會太慢
-        df = stock.history(period="3y")
+        # 抓 1 年數據即可，減少 API 負擔，加快速度
+        df = stock.history(period="1y")
         
-        # 容錯：如果找不到，嘗試切換後綴
+        # 容錯：找不到就換後綴
         if df.empty:
             if ticker.endswith(".HK"):
                 alt = ticker.replace(".HK", "")
                 stock = yf.Ticker(alt)
-                df = stock.history(period="3y")
+                df = stock.history(period="1y")
                 if not df.empty: ticker = alt
-            elif ticker.isdigit():
+            elif ticker.isdigit(): # 這是關鍵：有些庫存檔是 0700.HK
                 alt = f"{int(ticker):04d}.HK"
                 stock = yf.Ticker(alt)
-                df = stock.history(period="3y")
+                df = stock.history(period="1y")
                 if not df.empty: ticker = alt
         
         if df.empty: return None, None, ticker
 
-        # 獲取名稱 (如果字典裡有就用字典的，沒有就抓 Yahoo 的)
+        # 獲取名稱 (如果 Yahoo 抓不到，就用代碼本身，不要回傳 None)
         name = ticker
         try: 
-            name = stock.info.get('longName', ticker)
+            info_name = stock.info.get('longName')
+            if info_name: name = info_name
         except: pass
             
         return df, name, ticker
     except:
         return None, None, ticker
 
-def get_chart_data(ticker, period_str):
-    # 處理圖表週期的轉換
-    p_map = {
-        "1天": ("1d", "5m"), "5天": ("5d", "15m"), 
-        "1週": ("5d", "30m"), "1月": ("1mo", "1d"), 
-        "3月": ("3mo", "1d"), "6月": ("6mo", "1d"), 
-        "1年": ("1y", "1d"), "3年": ("3y", "1d"), "全部": ("max", "1d")
-    }
-    p, i = p_map.get(period_str, ("1y", "1d"))
-    return yf.Ticker(ticker).history(period=p, interval=i)
-
-# --- 4. 狼性數學運算 (Aggressive Math) ---
+# --- 4. 狼性數學運算 (Wolf Math) ---
 def calculate_wolf_levels(df):
-    if len(df) < 60: return df, 0, 0, 0, 0, 0, "盤整"
+    if len(df) < 50: return df, 0, 0, 0, 0, 0, "數據不足"
     
-    # 均線
-    df['MA20'] = df['Close'].rolling(window=20).mean() # 月線
-    df['MA60'] = df['Close'].rolling(window=60).mean() # 季線
-    df['MA200'] = df['Close'].rolling(window=200).mean() # 牛熊線
-    
-    # EMA (指數移動平均) - 反應更快，適合強勢股
-    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    # 指標
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA60'] = df['Close'].rolling(window=60).mean()
+    df['MA200'] = df['Close'].rolling(window=200).mean()
+    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean() # 狼性指標
     
     # 布林
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['Upper'] = df['MA20'] + (2 * df['STD20'])
     df['Lower'] = df['MA20'] - (2 * df['STD20'])
-    df['RSI'] = 100 - (100 / (1 + df['Close'].diff().where(df['Close'].diff() > 0, 0).rolling(14).mean() / (-df['Close'].diff().where(df['Close'].diff() < 0, 0).rolling(14).mean())))
+    
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
 
     last = df.iloc[-1]
     
-    # 判斷趨勢強度
-    trend_status = "盤整"
-    if last['Close'] > last['MA60'] and last['MA20'] > last['MA60']:
-        trend_status = "強勢多頭 🔥"
-    elif last['Close'] < last['MA60']:
-        trend_status = "弱勢空頭 ❄️"
+    # 趨勢判斷
+    trend = "盤整震盪"
+    if last['Close'] > last['MA60']: trend = "多頭趨勢"
+    if last['Close'] > last['MA60'] and last['MA20'] > last['MA60']: trend = "強勢多頭 🔥"
+    if last['Close'] < last['MA60']: trend = "空頭趨勢 ❄️"
 
-    # --- 關鍵：決定買入點 (不再只看地板) ---
-    
-    # 1. 積極買點 (Aggressive)：針對 NVDA 這種強勢股
-    # 如果是強勢多頭，回踩 EMA20 或 MA20 就是買點，不用等布林下軌
+    # --- 狼性買點邏輯 ---
+    # 1. 積極買點：EMA20 (強勢股回檔不破月線)
     aggressive_buy = last['EMA20']
     
-    # 2. 保守買點 (Conservative)：針對震盪股
-    # 尋找近期波段的 0.618 或 布林下軌
+    # 2. 保守買點：波段 0.618 或 布林下軌
     recent_high = df['High'].tail(60).max()
     recent_low = df['Low'].tail(60).min()
-    fibo_support = recent_high - (recent_high - recent_low) * 0.382 # 強勢回調只回 0.382
-    conservative_buy = max(last['Lower'], fibo_support) # 取較高的支撐
+    fibo_support = recent_high - (recent_high - recent_low) * 0.382
+    conservative_buy = max(last['Lower'], fibo_support)
     
-    # 智能選擇：如果是強勢多頭，AI 傾向推薦積極買點
-    final_buy_ref = aggressive_buy if "強勢" in trend_status else conservative_buy
+    # 決策：如果是強勢多頭，AI 推薦積極買點；否則推薦保守買點
+    final_buy = aggressive_buy if "強勢" in trend else conservative_buy
 
-    # --- 決定賣出點 ---
-    # 積極獲利：布林上軌
-    # 瘋狂獲利：布林上軌 + 1 ATR
-    ranges = df['High'] - df['Low']
-    atr = ranges.rolling(14).mean().iloc[-1]
-    final_sell_ref = max(last['Upper'], last['Close'] + 2*atr)
+    # 賣點：布林上軌 或 前高
+    final_sell = max(last['Upper'], recent_high)
+    
+    # ATR 止損
+    high_low = df['High'] - df['Low']
+    atr = high_low.rolling(14).mean().iloc[-1]
 
-    return df, final_buy_ref, final_sell_ref, atr, last['MA200'], last['EMA20'], trend_status
+    return df, final_buy, final_sell, atr, last['MA200'], last['EMA20'], trend
 
-# --- 5. AI 核心 (狼性 Prompt) ---
-def call_gemini(api_key, prompt):
+# --- 5. AI 連線核心 (含自動重試機制 - Anti-429) ---
+def call_gemini_retry(api_key, prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200: return response.json()['candidates'][0]['content']['parts'][0]['text']
-        return f"Error {response.status_code}"
-    except Exception as e: return str(e)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code == 200:
+                return response.json()['candidates'][0]['content']['parts'][0]['text']
+            
+            elif response.status_code == 429:
+                # 遇到 429 錯誤，等待後重試 (Exponential Backoff)
+                wait_time = 2 ** (attempt + 1) # 2s, 4s, 8s
+                time.sleep(wait_time)
+                continue # 重試
+                
+            else:
+                return f"連線錯誤 Code: {response.status_code}"
+                
+        except Exception as e:
+            return f"系統錯誤: {str(e)}"
+            
+    return "🚨 系統忙碌 (429)：已重試 3 次仍無回應，請稍後再試。"
 
 def ask_gemini_wolf(api_key, name, ticker, df, style, buy_ref, sell_ref, atr, ma200, ema20, trend):
     last = df.iloc[-1]
     
-    data_summary = f"""
-    【標的】{name} ({ticker})
-    【現價】{last['Close']:.2f}
-    【市場狀態】{trend} (MA200: {ma200:.2f})
-    【動能指標】EMA20(短線生命線): {ema20:.2f}, RSI: {last['RSI']:.2f}
+    # 如果 Yahoo 沒抓到名字，直接用 ticker 代替，避免 AI 混亂
+    display_name = name if name else ticker
     
-    【系統計算的交易邊界】
-    - 建議買入價：{buy_ref:.2f} (依據：{trend} 下的動態支撐)
-    - 建議賣出價：{sell_ref:.2f} (依據：壓力位延伸)
+    data_summary = f"""
+    【標的】{display_name} ({ticker})
+    【現價】{last['Close']:.2f}
+    【趨勢】{trend} (MA200: {ma200:.2f})
+    【動能】RSI: {last['RSI']:.2f}
+    
+    【狼性交易邊界】
+    - 建議買入：{buy_ref:.2f} (若為強勢股，此為 EMA20 支撐)
+    - 建議賣出：{sell_ref:.2f}
     - ATR波動：{atr:.2f}
     """
     
     prompt = f"""
-    角色：華爾街擁有 20 年經驗的頂級交易員。風格：{style}。
-    心態：自信、果斷、專業。不要使用「可能、也許」這種不確定的詞彙。
+    角色：華爾街頂級交易員 (20年經驗)，風格：{style}。
+    任務：根據數據給出明確、有自信的交易指令。
     
-    任務：給出明確的交易指令。
-    
-    ⚠️ **針對用戶投訴的回應**：
-    用戶之前抱怨買點太保守 (太低買不到)。
-    請注意：如果現在是「強勢多頭」，請大膽建議在 EMA20 ({ema20:.2f}) 或 MA20 附近介入，**不要** 叫用戶等到崩盤才買。
+    ⚠️ **指令**：
+    1. **確認標的**：你分析的是 {display_name}。如果名字看起來是代碼，請自行判斷公司。
+    2. **狼性思維**：如果是「強勢多頭」，請建議在 {buy_ref:.2f} (EMA20) 附近積極佈局，不要叫人等崩盤。
+    3. **拒絕模稜兩可**：直接給出價格和理由。
     
     請撰寫分析報告 (繁體中文)：
-    1. 🎯 **市場解讀**：直接判斷現在是主升段還是盤整？
+    1. 🎯 **市場解讀**：(一句話判斷多空強度)
     2. 🔵 **狙擊買入 (Entry)**：
-       - 價格：{buy_ref:.2f} (請引用此數值)
-       - 理由：(強調為什麼這裡進場風險回報比最好？如果是強勢股，強調「強勢回調不破月線」的邏輯)
+       - 價格：{buy_ref:.2f}
+       - 理由：(例如：回測 EMA20 強力支撐，趨勢未破)
     3. 🔴 **獲利了結 (Exit)**：價格 {sell_ref:.2f}。
-    4. 🛡️ **鐵血止損 (Stop)**：價格 {buy_ref - atr*1.5:.2f}。
+    4. 🛡️ **止損防線**：價格 {buy_ref - atr*1.5:.2f}。
     """
-    return call_gemini(api_key, prompt)
+    return call_gemini_retry(api_key, prompt)
 
 def ask_gemini_qa(api_key, name, ticker, df, question):
     last = df.iloc[-1]
-    prompt = f"角色：專業交易員 Felix。標的：{name} ({ticker}) 現價 {last['Close']}。用戶問：{question}。請簡潔專業回答。"
-    return call_gemini(api_key, prompt)
+    prompt = f"角色：專業交易員 Felix。標的：{name} ({ticker}) 現價 {last['Close']}。用戶問：{question}。請簡潔回答。"
+    return call_gemini_retry(api_key, prompt)
 
 # --- 主畫面 ---
 st.title("🏛️ Felix AI 股票分析員")
-st.caption("V33.0 Wolf Edition | Smart Search | Aggressive Algo")
+st.caption("V34.0 Anti-Fragile | Retry Logic | Smart Search")
 
 api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 if not api_key:
@@ -238,22 +258,22 @@ user_input = st.sidebar.text_input("輸入代碼 (可輸入 GOOGLE, NVDA, 700)",
 style = st.sidebar.selectbox("風格", ["趨勢波段 (Trend)", "價值投資 (Value)", "短線當沖 (Day Trade)"])
 
 st.sidebar.markdown("---")
-col1, col2 = st.sidebar.columns(2)
+# 功能按鈕區
 btn_analyze = st.sidebar.button("🔥 全面分析")
 
 st.sidebar.markdown("---")
-qa_input = st.sidebar.text_area("提問 (如：現在能追嗎？)", height=80)
+qa_input = st.sidebar.text_area("提問 (如：財報後會跌嗎？)", height=80)
 btn_ask = st.sidebar.button("💬 提問解答")
 
 if btn_analyze:
     if not api_key: st.error("No API Key")
     else:
-        # 1. 智能代碼轉換
+        # 1. 智能搜尋 (模擬富途)
         real_ticker = resolve_ticker(user_input)
         st.info(f"🔍 識別代碼：{user_input} ➝ {real_ticker}")
         
-        # 2. 抓取數據 (3年)
-        df, name, ticker = get_data_v33(real_ticker)
+        # 2. 抓取數據
+        df, name, ticker = get_data_v34(real_ticker)
         
         if df is not None:
             # 3. 狼性運算
@@ -263,36 +283,31 @@ if btn_analyze:
             
             st.subheader(f"📊 {name} ({ticker})")
             
-            # 數據卡片
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("現價", f"{last['Close']:.2f}", f"{(last['Close']-prev['Close']):.2f}")
-            c2.metric("趨勢狀態", trend)
-            c3.metric("積極買點", f"{buy_ref:.2f}")
-            c4.metric("EMA20 (強支撐)", f"{ema20:.2f}")
+            c2.metric("趨勢強度", trend)
+            c3.metric("建議買點", f"{buy_ref:.2f}")
+            c4.metric("強支撐 (EMA20)", f"{ema20:.2f}")
 
             tab1, tab2 = st.tabs(["🧠 AI 狼性策略", "📈 專業圖表"])
             
             with tab1:
+                # 呼叫 AI (含自動重試)
                 report = ask_gemini_wolf(api_key, name, ticker, df, style, buy_ref, sell_ref, atr, ma200, ema20, trend)
-                st.info(report)
+                if "429" in report:
+                    st.warning(report)
+                else:
+                    st.info(report)
                 
             with tab2:
-                # 圖表週期選擇
-                t_options = ["1天", "5天", "1週", "1月", "3月", "6月", "1年", "3年", "全部"]
-                t_sel = st.radio("週期：", t_options, index=6, horizontal=True)
-                
-                chart_df = get_chart_data(ticker, t_sel)
-                if not chart_df.empty:
-                    fig = go.Figure()
-                    fig.add_trace(go.Candlestick(x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'], name='K線'))
-                    
-                    # 只在日線級別畫均線
-                    if t_sel not in ["1天", "5天", "1週"]:
-                        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['Close'].ewm(span=20).mean(), line=dict(color='orange', width=1), name='EMA20'))
-                        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['Close'].rolling(60).mean(), line=dict(color='cyan', width=1), name='MA60'))
-                    
-                    fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, title=f"{ticker} ({t_sel})")
-                    st.plotly_chart(fig, use_container_width=True)
+                # 預設顯示 1 年圖表
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='orange', width=1), name='EMA20'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='red', width=1, dash='dot'), name='布林上'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='green', width=1, dash='dot'), name='布林下'))
+                fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
         else:
             st.error(f"❌ 找不到數據：{real_ticker} (請確認代碼)")
 
@@ -300,7 +315,7 @@ if btn_ask:
     if not api_key: st.error("No API Key")
     else:
         real_ticker = resolve_ticker(user_input)
-        df, name, ticker = get_data_v33(real_ticker)
+        df, name, ticker = get_data_v34(real_ticker)
         if df is not None:
             st.info(f"🤖 思考中：{qa_input}")
             ans = ask_gemini_qa(api_key, name, ticker, df, qa_input)
